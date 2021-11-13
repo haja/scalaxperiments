@@ -1,68 +1,116 @@
 // no scalatags for scala 3.0 available yet
 import $ivy.`com.lihaoyi:scalatags_2.13:0.9.1`, scalatags.Text.all._
-import $ivy.`com.atlassian.commonmark:commonmark:0.13.1`, scalatags.Text.all._
+import $ivy.`com.atlassian.commonmark:commonmark:0.13.1`
+import $ivy.`dev.zio::zio:2.0.0-M4`, zio._
+
+import java.io.IOException
+
+interp.watch(os.pwd / "posts")
 
 val targetBase = os.pwd / "out"
-os.remove.all(targetBase)
-os.makeDir(targetBase)
-os.makeDir(targetBase / "posts")
 
-val parser = org.commonmark.parser.Parser.builder().build()
-val renderer = org.commonmark.renderer.html.HtmlRenderer.builder().build()
-def mdTransformer(source: String): String =
-  val doc = parser.parse(source)
-  renderer.render(doc)
+object MdTransformer:
+  val parser = org.commonmark.parser.Parser.builder().build()
+  val renderer = org.commonmark.renderer.html.HtmlRenderer.builder().build()
+
+  def transform(source: String): UIO[String] =
+    for {
+      doc <- ZIO.succeed(parser.parse(source))
+      rendered <- ZIO.succeed(renderer.render(doc))
+    } yield rendered
 
 
 case class Post(id: Int, name: String, source: os.Path):
   def target: os.Path = targetBase / "posts" / s"$id-${name.replace(" ", "_")}.html"
-  def asHtml: String = mdTransformer(os.read(source))
 
-interp.watch(os.pwd / "posts")
+  private val htmlContent: IO[IOException, String] =
+    for {
+      content <- ZIO.attemptBlockingIO(os.read(source))
+      html <- MdTransformer.transform(content)
+    } yield html
 
-val posts = os.list(os.pwd / "posts")
-  .filter(_.toString.endsWith(".md"))
-  .map (p => {
-    val s"$id-$name.md" = p.last
-    Post(id.toInt, name, p)
-  })
-  .sortBy(_._1)
-
-
-def toHeading(posts: Seq[Post]) = for {
-  p@Post(_, name, _) <- posts
-} yield h2(
-  a(href := p.target.toString)(
-    name
+  val asHtml: IO[IOException, Frag] =
+    for {
+      content <- htmlContent
+    } yield
+    html(
+      head(),
+      body(
+        h1(
+          a(href := "../index.html")(
+            name
+          )),
+      raw(content)
+    )
   )
-)
 
-val index = html(
-  head(),
-  body(
-    h1(
-        "Posts"
-      ),
-  toHeading(posts)
-))
+  val asHeading: UIO[Frag] =
+    ZIO.succeed(
+      h2(
+        a(href := target.toString)(
+          name
+        )
+      )
+    )
+
+  val writePost: Task[Unit] =
+    for {
+      h <- asHtml
+      _ <- IO.attemptBlockingIO(os.write(target, h.render))
+    } yield ()
+
+case class Index(posts: Seq[Post]):
+  private val asHtml: UIO[Frag] =
+    for {
+      postHeadings <- ZIO.foreach(posts)(_.asHeading)
+    } yield
+    html(
+      head(),
+      body(
+        h1("Posts"),
+        postHeadings
+    ))
+
+  val write: Task[Unit] =
+    for {
+      h <- asHtml
+      _ <- IO.attemptBlockingIO {
+        os.write(targetBase / "index.html", h.render)
+      }
+    } yield ()
+
+val loadPosts: IO[IOException, Seq[Post]] =
+  IO.attemptBlockingIO {
+    os.list(os.pwd / "posts")
+      .filter(_.toString.endsWith(".md"))
+      .map (p => {
+        val s"$id-$name.md" = p.last
+        Post(id.toInt, name, p)
+      })
+        .sortBy(_._1)
+  }
 
 
-println(index.toString)
-os.write(os.pwd / "out" / "index.html", index)
-
-def writePost(post: Post) = html(
-  head(),
-  body(
-    h1(
-      a(href := "../index.html")(
-      post.name
-    )),
-    raw(post.asHtml)
-  )
-)
-
-for (p <- posts)
-  os.write(p.target, writePost(p))
+def recreateOut(targetBase: os.Path): IO[IOException, Unit] =
+  ZIO.attemptBlockingIO {
+    os.remove.all(targetBase)
+    os.makeDir(targetBase)
+    os.makeDir(targetBase / "posts")
+  }
 
 
+val program = for {
+  _ <- Console.printLine("cleaning target")
+  _ <- recreateOut(targetBase)
+  _ <- Console.printLine("loading posts")
+  posts <- loadPosts
+  _ <- Console.printLine(s"found ${posts.length} posts")
+  index = Index(posts)
+  _ <- index.write
+  _ <- Console.printLine("written index")
+  _ <- ZIO.foreachPar(posts)(_.writePost)
+  _ <- Console.printLine("written posts")
+} yield ()
+
+def run = Runtime.default.unsafeRun(program)
 
