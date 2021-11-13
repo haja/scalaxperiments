@@ -13,10 +13,10 @@ object MdTransformer:
   val parser = org.commonmark.parser.Parser.builder().build()
   val renderer = org.commonmark.renderer.html.HtmlRenderer.builder().build()
 
-  def transform(source: String): UIO[String] =
+  def transform(source: String): scala.util.Try[String] =
     for {
-      doc <- ZIO.succeed(parser.parse(source))
-      rendered <- ZIO.succeed(renderer.render(doc))
+      doc <- scala.util.Try(parser.parse(source))
+      rendered <- scala.util.Try(renderer.render(doc))
     } yield rendered
 
 
@@ -26,7 +26,7 @@ case class Post(id: Int, name: String, source: os.Path):
   private val htmlContent: IO[IOException, String] =
     for {
       content <- ZIO.attemptBlockingIO(os.read(source))
-      html <- MdTransformer.transform(content)
+      html <- ZIO.fromTry(MdTransformer.transform(content)).orDie
     } yield html
 
   val asHtml: IO[IOException, Frag] =
